@@ -35,4 +35,5 @@ if __name__ == '__main__':
                         '../../nli_test/word_sequence/label_snli_1.0_test.txt'],
     dictionary       = '../../nli_test/word_sequence/vocab_cased.pkl',
     embedding        = '../../nli_test/glove/glove.840B.300d.txt',
+    matching_rounds   = 3,
     )
