@@ -329,7 +329,7 @@ def AF_DMN_layer(tparams,options,prefix,sentence1,sentence2,x1_mask,x2_mask):
     A = temp3.dimshuffle(2,1,0)+tensor.addbroadcast(tensor.tensordot(sentence2,tparams[_p(prefix,'U_l')],[2, 0]),2)
     # A [batchsize,sent1,sent2]
     A = A.dimshuffle(1,2,0)
-    # ap[step1(sum),step2,batchsize] aq[step1,step2(sum),batchsize]
+    # aq[step1(sum),step2(soft),batchsize] ap[step1(soft),step2(sum),batchsize]
     aq,ap = AF_softmax(A,x1_mask,x2_mask)
     #hp[sent1(sum),batchsize,dim]
     hp = tensor.batched_dot(pre_hq.dimshuffle(1, 2, 0), ap.dimshuffle( 2, 1, 0)).dimshuffle(2,0,1)
@@ -359,9 +359,10 @@ def AF_DMN_layer(tparams,options,prefix,sentence1,sentence2,x1_mask,x2_mask):
     sp = _softmax(sp.dimshuffle(2,0,1),x1_mask)
     sq = _softmax(sq.dimshuffle(2,0,1),x2_mask)
     # _hp[sent1,batchsize,dim] _hq[sent2,batchsize,dim] sp[sent1(sum),sent1,batchsize] sq[sent2(sum),sent2,batchsize]
-    _hp = tensor.batched_dot(fp[0].dimshuffle(1, 2, 0), sp.dimshuffle( 2, 1, 0)).dimshuffle(2,0,1)
-    _hq = tensor.batched_dot(fq[0].dimshuffle(1, 2, 0), sq.dimshuffle( 2, 1, 0)).dimshuffle(2,0,1)
-
+    #todo sp.dimshuffle( 2, 1, 0) sq.dimshuffle( 2, 1, 0)
+    _hp = tensor.batched_dot(fp[0].dimshuffle(1, 2, 0), sp.dimshuffle( 2, 0, 1)).dimshuffle(2,0,1)
+    _hq = tensor.batched_dot(fq[0].dimshuffle(1, 2, 0), sq.dimshuffle( 2, 0, 1)).dimshuffle(2,0,1)
+    
     # fusion for self attention
     inp2 = concatenate([fp[0], _hp, fp[0] - _hp, fp[0] * _hp], axis=2)
     inq2 = concatenate([fq[0], _hq, fq[0] - _hq, fq[0] * _hq], axis=2)
