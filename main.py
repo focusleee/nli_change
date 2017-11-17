@@ -279,34 +279,34 @@ def param_init_AF(options,params,prefix,nin=None,dim=None):
     params[_p(prefix,'U_l')]=U_l
     ctxdim = options['dim']
     params = get_layer('ff')[0](options, params, prefix=_p(prefix,'cross-attention-relu_p'),
-                                nin=ctxdim * 4, nout=options['dim'],
+                                nin=ctxdim * 5, nout=options['dim'],
                                 ortho=False)
     params = get_layer('ff')[0](options, params, prefix=_p(prefix, 'cross-attention-relu_q'),
-                                nin=ctxdim * 4, nout=options['dim'],
+                                nin=ctxdim * 5, nout=options['dim'],
                                 ortho=False)
 
     params = get_layer(options['encoder'])[0](options, params,
                                               prefix=_p(prefix,'cross-attention-lstm_p'),
-                                              nin=options['dim_word'],
+                                              nin=options['dim_word'] * 3,
                                               dim=options['dim'])
     params = get_layer(options['encoder'])[0](options, params,
                                               prefix=_p(prefix,'cross-attention-lstm_q'),
-                                              nin=options['dim_word'],
+                                              nin=options['dim_word'] * 3,
                                               dim=options['dim'])
     params = get_layer('ff')[0](options, params, prefix=_p(prefix, 'self-attention-relu_p'),
-                                nin=ctxdim * 4, nout=options['dim'],
+                                nin=ctxdim * 7, nout=options['dim'],
                                 ortho=False)
     params = get_layer('ff')[0](options, params, prefix=_p(prefix, 'self-attention-relu_q'),
-                                nin=ctxdim * 4, nout=options['dim'],
+                                nin=ctxdim * 7, nout=options['dim'],
                                 ortho=False)
 
     params = get_layer(options['encoder'])[0](options, params,
                                               prefix=_p(prefix, 'self-attention-lstm_p'),
-                                              nin=options['dim_word'],
+                                              nin=options['dim_word'] * 5,
                                               dim=options['dim'])
     params = get_layer(options['encoder'])[0](options, params,
                                               prefix=_p(prefix, 'self-attention-lstm_q'),
-                                              nin=options['dim_word'],
+                                              nin=options['dim_word'] * 5,
                                               dim=options['dim'])
     return params
 # todo AF_DMN_layer
@@ -329,7 +329,7 @@ def AF_DMN_layer(tparams,options,prefix,sentence1,sentence2,x1_mask,x2_mask):
     A = temp3.dimshuffle(2,1,0)+tensor.addbroadcast(tensor.tensordot(sentence2,tparams[_p(prefix,'U_l')],[2, 0]),2)
     # A [batchsize,sent1,sent2]
     A = A.dimshuffle(1,2,0)
-    # aq[step1(sum),step2(soft),batchsize] ap[step1(soft),step2(sum),batchsize]
+    # ap[step1(sum),step2,batchsize] aq[step1,step2(sum),batchsize]
     aq,ap = AF_softmax(A,x1_mask,x2_mask)
     #hp[sent1(sum),batchsize,dim]
     hp = tensor.batched_dot(pre_hq.dimshuffle(1, 2, 0), ap.dimshuffle( 2, 1, 0)).dimshuffle(2,0,1)
@@ -338,17 +338,24 @@ def AF_DMN_layer(tparams,options,prefix,sentence1,sentence2,x1_mask,x2_mask):
     # fusion for cross attention
     inp1 = concatenate([pre_hp, hp, pre_hp - hp, pre_hp * hp], axis=2)
     inq1 = concatenate([pre_hq, hq, pre_hq - hq, pre_hq * hq], axis=2)
-    inp1 = get_layer('ff')[1](tparams, inp1, options, prefix=_p(prefix,'cross-attention-relu_p'), activ='relu')
-    inq1 = get_layer('ff')[1](tparams, inq1, options, prefix=_p(prefix,'cross-attention-relu_q'), activ='relu')
+    # todo shortcut
+    stepp1 = concatenate([inp1,sentence1],axis=2)
+    stepq1 = concatenate([inq1,sentence2],axis=2)
+    inp1 = get_layer('ff')[1](tparams, stepp1, options, prefix=_p(prefix,'cross-attention-relu_p'), activ='relu')
+    inq1 = get_layer('ff')[1](tparams, stepq1, options, prefix=_p(prefix,'cross-attention-relu_q'), activ='relu')
     if options['use_dropout']:
         inp1 = dropout_layer(inp1, use_noise, trng)
         inq1 = dropout_layer(inq1, use_noise, trng)
-    #fp[step1,batchsize,dim]4*300
-    fp = get_layer(options['decoder'])[1](tparams, inp1, options,
+    #todo shortcut 900
+    stepp2 = concatenate([inp1,hp,sentence1],axis=2)
+    stepq2 = concatenate([inq1,hq,sentence2],axis=2)
+
+    #fp[step1,batchsize,dim]300
+    fp = get_layer(options['decoder'])[1](tparams, stepp2, options,
                                             prefix=_p(prefix,'cross-attention-lstm_p'),
                                             mask=x1_mask)
     #fq[step2,batchsize,dim]
-    fq =  get_layer(options['decoder'])[1](tparams, inq1, options,
+    fq =  get_layer(options['decoder'])[1](tparams, stepq2, options,
                                             prefix=_p(prefix,'cross-attention-lstm_q'),
                                             mask=x2_mask)
      #self-attention
@@ -359,38 +366,31 @@ def AF_DMN_layer(tparams,options,prefix,sentence1,sentence2,x1_mask,x2_mask):
     sp = _softmax(sp.dimshuffle(2,0,1),x1_mask)
     sq = _softmax(sq.dimshuffle(2,0,1),x2_mask)
     # _hp[sent1,batchsize,dim] _hq[sent2,batchsize,dim] sp[sent1(sum),sent1,batchsize] sq[sent2(sum),sent2,batchsize]
-    #todo sp.dimshuffle( 2, 1, 0) sq.dimshuffle( 2, 1, 0)
-    _hp = tensor.batched_dot(fp[0].dimshuffle(1, 2, 0), sp.dimshuffle( 2, 0, 1)).dimshuffle(2,0,1)
-    _hq = tensor.batched_dot(fq[0].dimshuffle(1, 2, 0), sq.dimshuffle( 2, 0, 1)).dimshuffle(2,0,1)
-    
+    _hp = tensor.batched_dot(fp[0].dimshuffle(1, 2, 0), sp.dimshuffle( 2, 1, 0)).dimshuffle(2,0,1)
+    _hq = tensor.batched_dot(fq[0].dimshuffle(1, 2, 0), sq.dimshuffle( 2, 1, 0)).dimshuffle(2,0,1)
+
     # fusion for self attention
     inp2 = concatenate([fp[0], _hp, fp[0] - _hp, fp[0] * _hp], axis=2)
     inq2 = concatenate([fq[0], _hq, fq[0] - _hq, fq[0] * _hq], axis=2)
-    inp2 = get_layer('ff')[1](tparams, inp2, options, prefix=_p(prefix,'self-attention-relu_p'), activ='relu')
-    inq2 = get_layer('ff')[1](tparams, inq2, options, prefix=_p(prefix,'self-attention-relu_q'), activ='relu')
+    # todo shortcut
+    stepp3 = concatenate([inp2,inp1,hp,sentence1],axis=2)
+    stepq3 = concatenate([inq2,inq1,hq,sentence2],axis=2)
+    inp2 = get_layer('ff')[1](tparams, stepp3, options, prefix=_p(prefix,'self-attention-relu_p'), activ='relu')
+    inq2 = get_layer('ff')[1](tparams, stepq3, options, prefix=_p(prefix,'self-attention-relu_q'), activ='relu')
     if options['use_dropout']:
         inp2 = dropout_layer(inp2, use_noise, trng)
         inq2 = dropout_layer(inq2, use_noise, trng)
-    final_hp =  get_layer(options['decoder'])[1](tparams, inp2, options,
+    #todo shortcut
+    stepp4 = concatenate([ inp2, _hp, inp1, hp, sentence1],axis=2)
+    stepq4 = concatenate([ inq2, _hq, inq1, hq, sentence2], axis=2)
+    final_hp =  get_layer(options['decoder'])[1](tparams, stepp4, options,
                                             prefix=_p(prefix,'self-attention-lstm_p'),
                                             mask=x1_mask)
-    final_hq = get_layer(options['decoder'])[1](tparams, inq2, options,
+    final_hq = get_layer(options['decoder'])[1](tparams, stepq4, options,
                                             prefix=_p(prefix,'self-attention-lstm_q'),
                                             mask=x2_mask)
 
     return final_hp,final_hq
-    # final_hp=  get_layer(options['decoder'])[1](tparams, sentence1, options,
-    #                                             prefix=_p(prefix,'self-attention-lstm_p'),
-    #                                           mask=x1_mask)
-    # final_hq = get_layer(options['decoder'])[1](tparams, sentence2, options,
-    #                                          prefix=_p(prefix,'self-attention-lstm_q'),
-    #                                          mask=x2_mask)
-    # return fp,fq
-
-
-
-
-
 
 
 
@@ -530,20 +530,6 @@ def init_params(options, worddicts):
 
     ctxdim = options['dim'] * 2
 
-    # decoder: bidirectional RNN
-    # params = get_layer(options['decoder'])[0](options, params,
-    #                                           prefix='decoder',
-    #                                           nin=options['dim'],
-    #                                           dim=options['dim'])
-    # params = get_layer(options['decoder'])[0](options, params,
-    #                                           prefix='decoder_r',
-    #                                           nin=options['dim'],
-    #                                           dim=options['dim'])
-    #
-    # params = get_layer('ff')[0](options, params, prefix='projection',
-    #                             nin=ctxdim * 4, nout=options['dim'],
-    #                             ortho=False)
-    #
     # classifier
     params = get_layer('ff')[0](options, params, prefix='ff_layer_1',
                                 nin=options['dim'] * 8, nout=options['dim'], ortho=False)
@@ -612,55 +598,7 @@ def build_model(tparams, options):
     # context will be the concatenation of forward and backward rnns
     ctx2 = concatenate([proj2[0], projr2[0][::-1]], axis=proj2[0].ndim - 1)
     #
-    # # ctx1: #step1 x #sample x #dimctx
-    # # ctx2: #step2 x #sample x #dimctx
-    # ctx1 = ctx1 * x1_mask[:, :, None]
-    # ctx2 = ctx2 * x2_mask[:, :, None]
-    #
-    # # weight_matrix: #sample x #step1 x #step2
-    # weight_matrix = tensor.batched_dot(ctx1.dimshuffle(1, 0, 2), ctx2.dimshuffle(1, 2, 0))
-    # weight_matrix_1 = tensor.exp(weight_matrix - weight_matrix.max(1, keepdims=True)).dimshuffle(1, 2, 0)
-    # weight_matrix_2 = tensor.exp(weight_matrix - weight_matrix.max(2, keepdims=True)).dimshuffle(1, 2, 0)
-    #
-    # # weight_matrix_1: #step1 x #step2 x #sample
-    # weight_matrix_1 = weight_matrix_1 * x1_mask[:, None, :]
-    # weight_matrix_2 = weight_matrix_2 * x2_mask[None, :, :]
-    #
-    # alpha = weight_matrix_1 / weight_matrix_1.sum(0, keepdims=True)
-    # beta = weight_matrix_2 / weight_matrix_2.sum(1, keepdims=True)
-    #
-    # # ctx1: #step1 x #sample x #dimctx
-    # # ctx2: #step2 x #sample x #dimctx
-    # ctx2_ = (ctx1.dimshuffle(0, 'x', 1, 2) * alpha.dimshuffle(0, 1, 2, 'x')).sum(0)
-    # ctx1_ = (ctx2.dimshuffle('x', 0, 1, 2) * beta.dimshuffle(0, 1, 2, 'x')).sum(1)
-    #
-    # inp1 = concatenate([ctx1, ctx1_, ctx1 * ctx1_, ctx1 - ctx1_], axis=2)
-    # inp2 = concatenate([ctx2, ctx2_, ctx2 * ctx2_, ctx2 - ctx2_], axis=2)
-    #
-    # inp1 = get_layer('ff')[1](tparams, inp1, options, prefix='projection', activ='relu')
-    # inp2 = get_layer('ff')[1](tparams, inp2, options, prefix='projection', activ='relu')
-    #
-    # if options['use_dropout']:
-    #     inp1 = dropout_layer(inp1, use_noise, trng)
-    #     inp2 = dropout_layer(inp2, use_noise, trng)
-    #
-    # inpr1 = inp1[::-1]
-    # inpr2 = inp2[::-1]
-    #
-    # # decoder
-    # proj3 = get_layer(options['decoder'])[1](tparams, inp1, options,
-    #                                          prefix='decoder',
-    #                                          mask=x1_mask)
-    # projr3 = get_layer(options['decoder'])[1](tparams, inpr1, options,
-    #                                           prefix='decoder_r',
-    #                                           mask=xr1_mask)
-    #
-    # proj4 = get_layer(options['decoder'])[1](tparams, inp2, options,
-    #                                          prefix='decoder',
-    #                                          mask=x2_mask)
-    # projr4 = get_layer(options['decoder'])[1](tparams, inpr2, options,
-    #                                           prefix='decoder_r',
-    #                                           mask=xr2_mask)
+
     # TODO proj3 projr3 proj4 projr4
     proj1[0] = proj1[0] * x1_mask[:, :, None]
     proj2[0] = proj2[0] * x2_mask[:, :, None]
